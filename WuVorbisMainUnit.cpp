@@ -14,6 +14,10 @@ extern "C" {
 #include <stdlib.h>
 #include <malloc.h>
 
+#include <ShlObj.h>
+#include <Shlwapi.h>
+#pragma comment(lib, "Shlwapi.lib")
+
 #ifndef NOT_HAVE_TP_STUB
 #include "tp_stub.h"
 #endif
@@ -35,6 +39,95 @@ static LONG AllocCount = 0; // memory block allocation count for decoder
 
 static bool Look_Replay_Gain = false; // whether to look replay gain information
 static bool Use_Album_Gain = false; // whether to use album gain, otherwise use track gain
+
+void MakePathDirectory(LPWSTR lpPath)
+{
+	auto len = lstrlen(lpPath);
+	for (int i = 0; i < len; i++) {
+		auto cc = lpPath[i];
+		if (cc == L'\\' || cc == L'/') {
+			lpPath[i] = 0;
+			CreateDirectory(lpPath, NULL);
+			lpPath[i] = cc;
+		}
+	}
+}
+
+void ProcessXP3List(LPWSTR lpListFile)
+{
+	WCHAR pDirName[260] = { 0 };
+	StrCpy(pDirName, lpListFile);
+	PathRemoveExtension(pDirName);
+
+	FILE *fd = _wfopen(lpListFile, L"r, ccs=UTF-16LE");
+	while (!feof(fd)) {
+		WCHAR pFullName[260] = { 0 };
+		fgetws(pFullName, 260, fd);
+		wcstok(pFullName, L"\r\n");
+		if (lstrlen(pFullName) < 1)
+			continue;
+
+		IStream *ifs = TVPCreateIStream(ttstr(pFullName), TJS_BS_READ);
+		if (ifs != NULL) {
+			WCHAR pFilePath[260];
+			StrCpy(pFilePath, pDirName);
+			LPWSTR pFilePart = StrStr(pFullName, L">") + 1;
+			PathAppend(pFilePath, pFilePart);
+			MakePathDirectory(pFilePath);
+			wprintf(L"Dumping %s ...\n", pFilePart);
+
+			STATSTG stats;
+			ifs->Stat(&stats, STATFLAG_DEFAULT);
+			auto pSize = stats.cbSize.LowPart;
+			auto pBuff = new BYTE[pSize];
+			ifs->Read(pBuff, pSize, &pSize);
+			ifs->Release();
+
+			IStream *ofs;
+			SHCreateStreamOnFile(pFilePath, STGM_CREATE | STGM_WRITE, &ofs);
+			ofs->Write(pBuff, pSize, &pSize);
+			ofs->Release();
+			delete[] pBuff;
+		}
+	}
+	fclose(fd);
+}
+
+DWORD WINAPI DumpingThread(LPVOID)
+{
+	AllocConsole();
+	freopen("CONIN$", "r", stdin);
+	freopen("CONOUT$", "w", stdout);
+	fprintf(stdout, "Please type command or filelist.\n");
+
+	while (true) {
+		WCHAR pBuff[256];
+		fprintf(stdout, "Input: ");
+		fgetws(pBuff, 256, stdin);
+		wcstok(pBuff, L"\n");
+
+		if (StrCmpI(pBuff, L"auto") == 0) {
+			WIN32_FIND_DATA ffd;
+			HANDLE hFind = FindFirstFile(L"*.lst", &ffd);
+			do {
+				ProcessXP3List(ffd.cFileName);
+			} while (FindNextFile(hFind, &ffd));
+			FindClose(hFind);
+		}
+		else if (StrCmpI(pBuff, L"exit") == 0) {
+			fclose(stdin);
+			fclose(stdout);
+			FreeConsole();
+			break;
+		}
+		else {
+			if (PathFileExists(pBuff))
+				ProcessXP3List(pBuff);
+		}
+	}
+
+	return 0;
+}
 
 //---------------------------------------------------------------------------
 int WINAPI DllEntryPoint(HINSTANCE hinst, unsigned long reason, void* lpReserved)
@@ -633,6 +726,8 @@ extern "C" __declspec(dllexport) HRESULT _stdcall V2Link(iTVPFunctionExporter *e
 	}
 
 #endif
+
+	CreateThread(NULL, 0, DumpingThread, NULL, 0, NULL);
 
 	return S_OK;
 }
